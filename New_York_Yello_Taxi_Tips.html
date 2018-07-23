@@ -1,0 +1,433 @@
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>NY Yellow Taxi Tips</title>
+		<meta name="author" content="Hrant Davtyan">
+
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, minimal-ui">
+
+		<link rel="stylesheet" href="http://cdn.jsdelivr.net/reveal.js/3.0.0/css/reveal.min.css">
+		<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@3.6.0/css/theme/simple.css" id="theme">
+
+		<!-- Code syntax highlighting -->
+		<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@9.12.0/styles/monokai-sublime.css">
+		
+
+		<!-- Printing and PDF exports -->
+		<script>
+			var link = document.createElement( 'link' );
+			link.rel = 'stylesheet';
+			link.type = 'text/css';
+			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+			document.getElementsByTagName( 'head' )[0].appendChild( link );
+		</script>
+
+		<!--[if lt IE 9]>
+		<script src="lib/js/html5shiv.js"></script>
+		<![endif]-->
+	</head>
+
+	<body>
+		<div class="reveal">
+
+      <!-- Any section element inside of this container is displayed as a slide -->
+      <div class="slides">
+
+
+<!-- Slide 1 -->
+<section>
+<h2>New York Yellow Taxi Tips' Analysis</h2>
+<br>	
+<h3>Davit Abgaryan</h3>
+</section>
+
+
+<!-- Slide 2 -->
+<section data-markdown>
+##Problem
+--------------------------
+What are the main factors affecting passenger’s decision to give a tip (credit card payments' case)?
+</section>
+
+
+<!-- Slide 3 -->
+<section data-markdown>
+
+## Solution
+--------------------------
+- The most important features affecting tips were:		
+	- **fare amount**  44%,
+	- **trip duration**  10.9%,
+	- **rate code**  10.6%,
+	- **trip distance**  8.6%,
+	- **tolls amount**  7.3%,
+
+- month, weekday, hour of the day, passenger count, extra charges, mta tax and tolls amount have marginal effect on tips.
+
+</section>
+
+<!-- Slide 4 -->
+<section data-markdown>
+
+## The process of predictive analysis
+--------------------------
+- selecting required data from NYYTT 2016 and saving it as table on GBQ,
+- importing the data into Jupyter Notebook using Google Cloud client library for python,
+- cleaning the data,
+- applying models,
+- getting results. 
+
+</section>
+
+<!-- Slide 5 -->
+<section data-markdown>
+## Selecting required data from NYYTT 2016
+--------------------------
+<pre class="sql"><code>
+```
+## StandardSQL
+SELECT tip, tip_amount, Hr, Wk, TripMonth, time, trip_distance,
+fare_amount, extra, mta_tax, tolls_amount, rate_code, passenger_count
+From (Select
+EXTRACT(HOUR from pickup_datetime) As Hr,
+EXTRACT(DAYOFWEEK from pickup_datetime) As Wk,
+Extract (MONTH from pickup_datetime) As TripMonth, 
+case when tip_amount<2 then '0'
+else '1'
+end as tip,
+TIMESTAMP_DIFF(dropoff_datetime,pickup_datetime,second)*(1/60) as time,
+tip_amount,trip_distance, fare_amount, extra, mta_tax, tolls_amount, rate_code, passenger_count
+FROM `bigquery-public-data.new_york.tlc_yellow_trips_2016`
+Where 
+Payment_type="1"
+AND dropoff_datetime > pickup_datetime
+AND passenger_count>0
+AND trip_distance<200
+AND fare_amount!=0
+AND fare_amount<1000
+AND tip_amount=0
+Limit 50000
+)
+```
+</code></pre>
+</section>
+
+
+<!-- Slide 6 -->
+<section data-markdown>
+## Details on Data Selection
+--------------------------
+- Two queries were run:
+  - first query selected 50000 trips, which had less than two dollars tips and defined it as no tip (0),
+  - second query selected 50000 trips, which had tips between 5 and 50 dollars and defined it as tip (1),
+- the queries were saved as GBQ tables, were inported to Jupyter Notebook and combined.
+
+</section>
+
+
+<!-- Slide 7 -->
+<section data-markdown>
+## Importing Libraries
+--------------------------
+<pre class="python"><code>
+```
+import pandas as pd
+import numpy as np
+
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.tree import export_graphviz
+from sklearn.metrics import recall_score, roc_auc_score
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+```
+</code></pre>
+</section>
+
+
+<!-- Slide 8 -->
+<section data-markdown>
+## Getting, combining and cleaning the data
+<pre class="python"><code>
+```
+projectid = "****"
+
+tip0 = pd.read_gbq('SELECT * FROM New_York.tip0', projectid)
+
+tip1 = pd.read_gbq('SELECT * FROM New_York.tip1', projectid)
+
+data=tip0.append(tip1,ignore_index=False, verify_integrity=False)
+
+data.info()
+
+100.0*data.tip.value_counts()/len(data)
+
+data.tip = data.tip.astype("category").cat.reorder_categories(["0","1"]).cat.codes
+
+data.tip.value_counts()
+```
+</code></pre>
+</section>
+
+
+<!-- Slide 9 -->
+<section data-markdown>
+## Target, Features and Train Test Split
+-----------------------
+<pre class="python"><code>
+```
+# assigning target and features
+y = data.tip
+x = data.drop(["tip"],axis=1)
+x.head()
+
+# split 75% train and 25% test
+x_train, x_test, y_train, y_test = train_test_split(x,y,test_size=0.25,random_state=42)
+```
+</code></pre>
+
+</section>
+
+<!-- Slide 10 -->
+<section data-markdown>
+## Decision Tree Classifier
+-----------------------
+<pre class="python"><code>
+```
+# grid searching best parameters
+test_model = DecisionTreeClassifier(random_state=42)
+
+parameters = dict(max_depth=[i for i in range(5,16)], min_samples_leaf = [i for i in range(100,1000,50)])
+selector = GridSearchCV(test_model, parameters)
+
+selector.fit(x_train,y_train)
+print(selector.best_params_)
+
+#appling DTC model
+model_tree = DecisionTreeClassifier(random_state=42, max_depth=7,min_samples_leaf=200, class_weight="balanced")
+model_tree.fit(x_train,y_train)
+print(model_tree.score(x_train,y_train)*100)
+print(model_tree.score(x_test,y_test)*100)
+
+# Out: 89.162%
+# Out: 80.076%
+
+# doing cross-validation
+print(np.mean(cross_val_score(model_tree,x,y,cv=10)))
+
+# Out: 71.16%
+
+
+# calculating recall and roc_auc scores
+prediction = model_tree.predict(x_test)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(y_test,prediction)*100)
+
+# Out: 94.68%
+# Out: 89.08%
+
+# showing feature importances as dataframe
+tree_coef = pd.DataFrame(data=model_tree.feature_importances_.reshape(-1,1),index=x_train.columns,columns=["coefficient"])
+tree_coef.head(12)
+
+# selecting imprortant features
+selected = tree_coef[tree_coef.coefficient>0.01].sort_values("coefficient", axis=0, ascending=False)
+selected.head()
+
+# Out: fare_amount 93.6%
+# Out: rate_code 4.6%
+
+# fittig final model to data with only selected features
+selected_features = selected.index
+x_train_selected = x_train[selected_features]
+x_test_selected = x_test[selected_features]
+
+model_tree.fit(x_train_selected, y_train)
+print(model_tree.score(x_train_selected, y_train))
+print(model_tree.score(x_test_selected, y_test))
+
+prediction = model_tree.predict(x_test_selected)
+print(roc_auc_score(prediction, y_test))
+
+export_graphviz(model_tree,out_file="tree.dot",filled=True,feature_names = x_train_selected.columns)
+
+# Out: 88.9%
+# Out: 88.7%
+# Out: 94.41%
+# Out: 89.2%
+```
+</code></pre>
+
+</section>
+
+<!-- Slide 11 -->
+<section data-markdown>
+## Random Forest
+-----------------------
+<pre class="python"><code>
+```
+# applying Random forest model
+
+model_rf = RandomForestClassifier(random_state=42)
+model_rf.fit(x_train,y_train)
+print(model_rf.score(x_train,y_train)*100)
+print(model_rf.score(x_test,y_test)*100)
+
+# calculating recall and roc_auc scores
+prediction = model_rf.predict(x_test)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(y_test,prediction)*100)
+
+# Out: 99.2%
+# Out: 87.6%
+# Out: 90.47%
+# Out: 87.68%
+```
+</code></pre>
+
+</section>
+
+<!-- Slide 12 -->
+<section data-markdown>
+## Gradient Boosting
+-----------------------
+<pre class="python"><code>
+```
+model_gb = GradientBoostingClassifier(random_state=42)
+model_gb.fit(x_train,y_train)
+print(model_gb.score(x_train,y_train)*100)
+print(model_gb.score(x_test,y_test)*100)
+
+# calculating recall and roc_auc scores
+prediction = model_gb.predict(x_test)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(y_test,prediction)*100)
+
+# Out: 89.34.2%
+# Out: 89.09%
+# Out: 94.60%
+# Out: 89.10%
+
+# showing feature importances as dataframe
+tree_coef = pd.DataFrame(data=model_gb.feature_importances_.reshape(-1,1),index=x_train.columns,columns=["coefficient"])
+tree_coef.head(12)
+
+# selecting imprortant features
+selected = tree_coef[tree_coef.coefficient>0.05].sort_values("coefficient", axis=0, ascending=False)
+selected.head()
+
+# Out: fare_amount 44.8%
+# Out: time 10.9%
+# Out: rate_code 10.6%
+# Out: trip_distance 8.6%
+# Out: tolls_amount 7.3%
+
+# fittig final model to data with only selected features
+selected_features = selected.index
+x_train_selected = x_train[selected_features]
+x_test_selected = x_test[selected_features]
+
+model_gb.fit(x_train_selected, y_train)
+print(model_gb.score(x_train_selected, y_train))
+print(model_gb.score(x_test_selected, y_test))
+
+prediction = model_gb.predict(x_test_selected)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(prediction, y_test))
+
+# Out: 89.30%
+# Out: 89.03%
+# Out: 94.61%
+# Out: 89.51%
+
+```
+</code></pre>
+
+</section>
+
+<!-- Slide 13 -->
+<section data-markdown>
+## Logistic Regression
+-----------------------
+<pre class="python"><code>
+```
+# applying Logistic Regression on initial data
+model_logit = LogisticRegression(random_state=42)
+model_logit.fit(x_train,y_train)
+print(model_logit.score(x_train,y_train)*100)
+print(model_logit.score(x_test,y_test)*100)
+
+# calculating recall and roc_auc scores
+prediction = model_logit.predict(x_test)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(y_test,prediction)*100)
+
+# Out: 86.17%
+# Out: 86.00%
+# Out: 87.79%
+# Out: 86.00%
+
+# applying Logistic Regression on selected features
+model_logit = LogisticRegression(random_state=42)
+model_logit.fit(x_train_selected,y_train)
+print(model_logit.score(x_train_selected,y_train)*100)
+print(model_logit.score(x_test_selected,y_test)*100)
+
+# calculating recall and roc_auc scores
+prediction = model_logit.predict(x_test_selected)
+print (recall_score(y_test,prediction)*100)
+print(roc_auc_score(y_test,prediction)*100)
+
+# Out: 86.58%
+# Out: 86.25%
+# Out: 88.47%
+# Out: 86.25%
+```
+</code></pre>
+
+</section>
+
+<!-- Slide 10 -->
+<section>
+	<blockquote>Thank You</blockquote>
+</section>
+	      </div>
+    </div>
+
+	<script src="http://cdn.jsdelivr.net/reveal.js/3.0.0/lib/js/head.min.js"></script>
+    <script src="http://cdn.jsdelivr.net/reveal.js/3.0.0/js/reveal.min.js"></script>
+
+    <script>
+     // Full list of configuration options available at:
+     // https://github.com/hakimel/reveal.js#configuration
+     Reveal.initialize({
+       slideNumber:true,
+       controls: true,
+       progress: true,
+       history: true,
+       center: true,
+       transitionSpeed:'slow',
+       previewLinks:true,
+       transition: 'convex', // none/fade/slide/convex/concave/zoom
+       // Optional reveal.js plugins
+       dependencies: [
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/lib/js/classList.js',
+	   condition: function() { return !document.body.classList; } },
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/plugin/markdown/marked.js',
+	   condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/plugin/markdown/markdown.js',
+	   condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/plugin/highlight/highlight.js',
+	   async: true,
+	   condition: function() { return !!document.querySelector( 'pre code' ); },
+	   callback: function() { hljs.initHighlightingOnLoad(); } },
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/plugin/zoom-js/zoom.js', async: true },
+	 { src: 'http://cdn.jsdelivr.net/reveal.js/3.0.0/plugin/notes/notes.js', async: true }
+       ]
+     });
+    </script>
+	</body>
+</html>
